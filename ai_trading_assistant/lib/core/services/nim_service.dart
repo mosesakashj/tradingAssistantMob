@@ -139,21 +139,30 @@ class NimService {
     required double balance,
     required String openTradesJson,
     required double marginLevelPct,
+    String language = 'en',
+    String? closedTradeStats,
   }) {
+    final langNote = language != 'en'
+        ? '\n- Respond in the user\'s language (code: $language).'
+        : '';
+    final statsNote = closedTradeStats != null
+        ? '\n- Historical performance: $closedTradeStats'
+        : '';
     final prompt = '''
-You are a concise Forex and precious metals trading assistant.
-The user trades XAUUSD (Gold) and XAGUSD (Silver).
+You are a concise multi-market trading coach and assistant.
+The user trades Forex, precious metals (XAUUSD/XAGUSD), cryptocurrencies, and indices.
 
 Current account context:
 - Account type: $accountType
 - Balance / Equity: \$${balance.toStringAsFixed(2)}
 - Open trades: $openTradesJson
-- Margin level: ${marginLevelPct == double.infinity ? 'No open trades' : '${marginLevelPct.toStringAsFixed(1)}%'}
+- Margin level: ${marginLevelPct == double.infinity ? 'No open trades' : '${marginLevelPct.toStringAsFixed(1)}%'}$statsNote
 
 Rules:
 - Be factual and concise (max 3 sentences for auto-insights).
 - Always highlight risk clearly if margin level is below 150%.
 - Use the account type to interpret lot sizes (cent account lots are 1/1000 of standard).
+- Give actionable advice specific to the user\'s open positions.$langNote
 ''';
     return NimMessage(role: 'system', content: prompt);
   }

@@ -77,6 +77,8 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
         ref.read(confirmedBalanceProvider).valueOrNull ?? 0.0;
     final openTrades =
         ref.read(openTradesProvider).valueOrNull ?? [];
+    final closedTrades =
+        ref.read(closedTradesProvider).valueOrNull ?? [];
     final calculator = ref.read(stopoutCalculatorProvider);
 
     final marginLevel = calculator?.marginLevelPct(
@@ -112,11 +114,18 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
     });
 
     // Build full message history for context
+    final wins = closedTrades.where((t) => (t.pnl ?? 0) > 0).length;
+    final closedStats = closedTrades.isEmpty
+        ? null
+        : '${closedTrades.length} closed trades, '
+            '${(wins / closedTrades.length * 100).toStringAsFixed(0)}% win rate';
     final systemMsg = NimService.buildSystemPrompt(
       accountType: settings?.accountType ?? 'usd',
       balance: balance,
       openTradesJson: tradesJson,
       marginLevelPct: marginLevel,
+      language: settings?.aiLanguage ?? 'en',
+      closedTradeStats: closedStats,
     );
 
     final history = [
@@ -175,7 +184,12 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
         children: [
           Expanded(
             child: _messages.isEmpty
-                ? _WelcomePanel()
+                ? _WelcomePanel(
+                    onSuggest: (text) {
+                      _messageCtrl.text = text;
+                      _send();
+                    },
+                  )
                 : ListView.builder(
                     controller: _scrollCtrl,
                     padding: const EdgeInsets.all(12),
@@ -196,9 +210,27 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
   }
 }
 
-class _WelcomePanel extends StatelessWidget {
+class _WelcomePanel extends ConsumerWidget {
+  const _WelcomePanel({required this.onSuggest});
+  final ValueChanged<String> onSuggest;
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final openTrades = ref.watch(openTradesProvider).valueOrNull ?? [];
+    final closedTrades = ref.watch(closedTradesProvider).valueOrNull ?? [];
+    final suggestions = [
+      if (openTrades.isNotEmpty)
+        'Analyse my ${openTrades.first.symbol} position'
+      else
+        'What should I look for before opening a trade?',
+      'Summarise my risk exposure',
+      if (closedTrades.length >= 3)
+        'What patterns do you see in my recent trades?'
+      else
+        'Give me a risk management tip',
+      'What is a good risk/reward ratio for day trading?',
+    ];
+
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
@@ -209,14 +241,14 @@ class _WelcomePanel extends StatelessWidget {
                 size: 48, color: AppTheme.primaryGreen),
             const SizedBox(height: 16),
             Text(
-              'AI Trading Assistant',
+              'AI Trading Coach',
               style: Theme.of(context).textTheme.titleLarge,
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
             const Text(
-              'Ask me anything about your open trades, margin levels, '
-              'or risk management. Your live account context is injected automatically.',
+              'Ask me about your positions, risk, market analysis, or '
+              'trading psychology. Your live account context is injected automatically.',
               style: TextStyle(color: Colors.grey),
               textAlign: TextAlign.center,
             ),
@@ -225,10 +257,8 @@ class _WelcomePanel extends StatelessWidget {
               spacing: 8,
               runSpacing: 8,
               alignment: WrapAlignment.center,
-              children: const [
-                _SuggestionChip('Is my gold position too large?'),
-                _SuggestionChip('What happens if XAU drops 50 pips?'),
-                _SuggestionChip('Summarise my risk exposure'),
+              children: [
+                for (final s in suggestions) _SuggestionChip(s, onSuggest),
               ],
             ),
           ],
@@ -239,8 +269,9 @@ class _WelcomePanel extends StatelessWidget {
 }
 
 class _SuggestionChip extends StatelessWidget {
-  const _SuggestionChip(this.label);
+  const _SuggestionChip(this.label, this.onTap);
   final String label;
+  final ValueChanged<String> onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -248,9 +279,7 @@ class _SuggestionChip extends StatelessWidget {
       label: Text(label, style: const TextStyle(fontSize: 12)),
       backgroundColor: AppTheme.cardDark,
       side: const BorderSide(color: Color(0xFF2A2A4A)),
-      onPressed: () {
-        // We can't easily wire to parent state here, so just a visual hint
-      },
+      onPressed: () => onTap(label),
     );
   }
 }

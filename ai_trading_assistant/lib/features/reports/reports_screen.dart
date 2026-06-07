@@ -3,7 +3,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
+import '../../core/constants/trading_constants.dart';
+import '../../core/models/trade_model.dart';
 import '../../core/providers/app_providers.dart';
+import '../../core/services/analytics_service.dart';
 import '../../core/services/export_service.dart';
 import '../../core/services/nim_service.dart';
 import '../../core/theme/app_theme.dart';
@@ -15,10 +18,24 @@ class ReportsScreen extends ConsumerStatefulWidget {
   ConsumerState<ReportsScreen> createState() => _ReportsScreenState();
 }
 
-class _ReportsScreenState extends ConsumerState<ReportsScreen> {
+class _ReportsScreenState extends ConsumerState<ReportsScreen>
+    with SingleTickerProviderStateMixin {
+  late final TabController _tabs;
   bool _exporting = false;
   String? _aiSummary;
   bool _generatingSummary = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabs = TabController(length: 5, vsync: this);
+  }
+
+  @override
+  void dispose() {
+    _tabs.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -27,18 +44,33 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Reports'),
+        title: const Text('Analytics'),
+        bottom: TabBar(
+          controller: _tabs,
+          isScrollable: true,
+          labelColor: AppTheme.primaryGreen,
+          unselectedLabelColor: Colors.grey,
+          indicatorColor: AppTheme.primaryGreen,
+          tabs: const [
+            Tab(text: 'Overview'),
+            Tab(text: 'By Market'),
+            Tab(text: 'By Symbol'),
+            Tab(text: 'By Session'),
+            Tab(text: 'By Setup'),
+          ],
+        ),
         actions: [
           PopupMenuButton<String>(
             onSelected: (v) async {
               final scaffoldMsg = ScaffoldMessenger.of(context);
-              final trades =
-                  await ref.read(tradesRepositoryProvider).getClosedTrades(
-                        ref.read(currentUserProvider)?.uid ?? '',
-                      );
+              final uid = ref.read(currentUserProvider)?.uid ?? '';
+              final trades = await ref
+                  .read(tradesRepositoryProvider)
+                  .getClosedTrades(uid);
               if (trades.isEmpty) {
                 scaffoldMsg.showSnackBar(
-                  const SnackBar(content: Text('No closed trades to export')),
+                  const SnackBar(
+                      content: Text('No closed trades to export')),
                 );
                 return;
               }
@@ -47,18 +79,12 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
                 if (v == 'csv') {
                   await ExportService.exportTradesToCsv(trades);
                 } else {
-                  final wins = trades.where((t) => (t.pnl ?? 0) > 0).length;
-                  final winRate =
-                      trades.isEmpty ? 0.0 : wins / trades.length * 100;
-                  final totalPnl = trades.fold<double>(
-                      0, (s, t) => s + (t.pnl ?? 0));
-                  final totalPips = trades.fold<double>(
-                      0, (s, t) => s + (t.pips ?? 0));
+                  final s = AnalyticsService.compute(trades);
                   await ExportService.exportTradesToPdf(
                     trades,
-                    winRate: winRate,
-                    totalPnl: totalPnl,
-                    totalPips: totalPips,
+                    winRate: s.winRate,
+                    totalPnl: s.netPnl,
+                    totalPips: s.totalPips,
                   );
                 }
               } finally {
@@ -81,208 +107,58 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
       body: tradesAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Center(child: Text('Error: $e')),
-        data: (trades) {
-          if (trades.isEmpty) {
+        data: (allTrades) {
+          if (allTrades.isEmpty) {
             return const Center(
-              child: Text(
-                'No closed trades yet.',
-                style: TextStyle(color: Colors.grey),
-              ),
+              child: Text('No closed trades yet.',
+                  style: TextStyle(color: Colors.grey)),
             );
           }
 
-          final wins = trades.where((t) => (t.pnl ?? 0) > 0).length;
-          final losses = trades.where((t) => (t.pnl ?? 0) < 0).length;
-          final winRate = trades.isEmpty
-              ? 0.0
-              : wins / trades.length * 100;
-          final totalPnl =
-              trades.fold<double>(0, (s, t) => s + (t.pnl ?? 0));
-          final totalPips =
-              trades.fold<double>(0, (s, t) => s + (t.pips ?? 0));
-          final best = trades.reduce(
-              (a, b) => (a.pnl ?? 0) > (b.pnl ?? 0) ? a : b);
-          final worst = trades.reduce(
-              (a, b) => (a.pnl ?? 0) < (b.pnl ?? 0) ? a : b);
+          // Sort chronologically for equity curve
+          final trades = [...allTrades]
+            ..sort((a, b) =>
+                (a.closedAt ?? a.openedAt)
+                    .compareTo(b.closedAt ?? b.openedAt));
 
-          // Build equity curve data
-          double running = 0;
-          final equityPoints = <FlSpot>[];
-          for (int i = 0; i < trades.length; i++) {
-            running += trades[i].pnl ?? 0;
-            equityPoints.add(FlSpot(i.toDouble(), running));
-          }
+          final stats = AnalyticsService.compute(trades);
+          final byMarket =
+              AnalyticsService.groupBy(trades, (t) => t.market);
+          final bySymbol =
+              AnalyticsService.groupBy(trades, (t) => t.symbol);
+          final bySession =
+              AnalyticsService.groupBy(trades, (t) => t.session);
+          final bySetup =
+              AnalyticsService.groupBy(trades, (t) => t.setup);
 
-          return ListView(
-            padding: const EdgeInsets.all(16),
+          return TabBarView(
+            controller: _tabs,
             children: [
-              // Stats grid
-              _StatsGrid(children: [
-                _StatCard(
-                    label: 'Win Rate',
-                    value: '${winRate.toStringAsFixed(1)}%',
-                    color: winRate >= 50
-                        ? AppTheme.primaryGreen
-                        : AppTheme.dangerRed),
-                _StatCard(
-                    label: 'Net P&L',
-                    value: '\$${fmt.format(totalPnl)}',
-                    color: totalPnl >= 0
-                        ? AppTheme.primaryGreen
-                        : AppTheme.dangerRed),
-                _StatCard(
-                    label: 'Total Pips',
-                    value: fmt.format(totalPips),
-                    color: totalPips >= 0
-                        ? AppTheme.primaryGreen
-                        : AppTheme.dangerRed),
-                _StatCard(
-                    label: 'Trades',
-                    value: '${wins}W / ${losses}L',
-                    color: Colors.white),
-              ]),
-              const SizedBox(height: 16),
-
-              // Best/Worst
-              Row(children: [
-                Expanded(
-                  child: Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text('Best Trade',
-                              style: TextStyle(
-                                  color: Colors.grey, fontSize: 11)),
-                          Text(
-                            '+\$${fmt.format(best.pnl ?? 0)}',
-                            style: const TextStyle(
-                                color: AppTheme.primaryGreen,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 16),
-                          ),
-                          Text('${best.direction.toUpperCase()} ${best.symbol}',
-                              style: const TextStyle(
-                                  color: Colors.grey, fontSize: 10)),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text('Worst Trade',
-                              style: TextStyle(
-                                  color: Colors.grey, fontSize: 11)),
-                          Text(
-                            '\$${fmt.format(worst.pnl ?? 0)}',
-                            style: const TextStyle(
-                                color: AppTheme.dangerRed,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 16),
-                          ),
-                          Text('${worst.direction.toUpperCase()} ${worst.symbol}',
-                              style: const TextStyle(
-                                  color: Colors.grey, fontSize: 10)),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ]),
-              const SizedBox(height: 16),
-
-              // Equity curve
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('Equity Curve',
-                          style: TextStyle(
-                              color: Colors.grey, fontSize: 12)),
-                      const SizedBox(height: 12),
-                      SizedBox(
-                        height: 160,
-                        child: LineChart(
-                          LineChartData(
-                            gridData: const FlGridData(show: false),
-                            titlesData: const FlTitlesData(show: false),
-                            borderData: FlBorderData(show: false),
-                            lineBarsData: [
-                              LineChartBarData(
-                                spots: equityPoints,
-                                isCurved: true,
-                                color: totalPnl >= 0
-                                    ? AppTheme.primaryGreen
-                                    : AppTheme.dangerRed,
-                                barWidth: 2,
-                                dotData: const FlDotData(show: false),
-                                belowBarData: BarAreaData(
-                                  show: true,
-                                  color: (totalPnl >= 0
-                                          ? AppTheme.primaryGreen
-                                          : AppTheme.dangerRed)
-                                        .withValues(alpha: 0.1),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+              _OverviewTab(
+                trades: trades,
+                stats: stats,
+                aiSummary: _aiSummary,
+                generatingSummary: _generatingSummary,
+                onGenerateSummary: () => _generateAiSummary(stats),
+                fmt: fmt,
               ),
-              const SizedBox(height: 16),
-
-              // AI Weekly Summary
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      const Text('AI Summary',
-                          style: TextStyle(
-                              color: Colors.grey, fontSize: 12)),
-                      const SizedBox(height: 8),
-                      if (_aiSummary != null)
-                        Text(_aiSummary!,
-                            style: const TextStyle(fontSize: 13)),
-                      const SizedBox(height: 12),
-                      OutlinedButton.icon(
-                        onPressed: _generatingSummary
-                            ? null
-                            : () => _generateAiSummary(
-                                  wins: wins,
-                                  losses: losses,
-                                  winRate: winRate,
-                                  totalPnl: totalPnl,
-                                  totalPips: totalPips,
-                                ),
-                        icon: _generatingSummary
-                            ? const SizedBox(
-                                height: 14,
-                                width: 14,
-                                child: CircularProgressIndicator(
-                                    strokeWidth: 2))
-                            : const Icon(Icons.auto_awesome, size: 16),
-                        label: Text(_generatingSummary
-                            ? 'Generating…'
-                            : 'Generate AI Summary'),
-                      ),
-                    ],
-                  ),
-                ),
+              _BreakdownTab(
+                grouped: byMarket,
+                labelMap: const {
+                  'forex': 'Forex',
+                  'metals': 'Metals',
+                  'crypto': 'Crypto',
+                  'indices': 'Indices',
+                },
+              ),
+              _BreakdownTab(grouped: bySymbol),
+              _BreakdownTab(
+                grouped: bySession,
+                labelMap: SessionDetector.sessionLabels,
+              ),
+              _BreakdownTab(
+                grouped: bySetup,
+                labelMap: TradeSetups.labels,
               ),
             ],
           );
@@ -291,29 +167,26 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
     );
   }
 
-  Future<void> _generateAiSummary({
-    required int wins,
-    required int losses,
-    required double winRate,
-    required double totalPnl,
-    required double totalPips,
-  }) async {
+  Future<void> _generateAiSummary(TradeStats stats) async {
     setState(() => _generatingSummary = true);
     final nim = ref.read(nimServiceProvider);
     if (nim == null) {
       setState(() => _generatingSummary = false);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Configure NIM API key in Settings first.')),
+          const SnackBar(
+              content: Text('Configure NIM API key in Settings first.')),
         );
       }
       return;
     }
-
     try {
       final settings = ref.read(settingsProvider).valueOrNull;
-      final balance = ref.read(confirmedBalanceProvider).valueOrNull ?? 0.0;
-
+      final balance =
+          ref.read(confirmedBalanceProvider).valueOrNull ?? 0.0;
+      final pfStr = stats.profitFactor == double.infinity
+          ? 'infinite'
+          : stats.profitFactor.toStringAsFixed(2);
       final summary = await nim.complete([
         NimService.buildSystemPrompt(
           accountType: settings?.accountType ?? 'usd',
@@ -323,11 +196,13 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
         ),
         NimMessage(
           role: 'user',
-          content:
-              'Write a brief performance summary for my trading history: '
-              '$wins wins, $losses losses, win rate ${winRate.toStringAsFixed(1)}%, '
-              'net P&L \$${totalPnl.toStringAsFixed(2)}, total pips ${totalPips.toStringAsFixed(1)}. '
-              'Keep it under 100 words and end with one actionable suggestion.',
+          content: 'Write a brief performance summary: '
+              '${stats.wins} wins, ${stats.losses} losses, '
+              'win rate ${stats.winRate.toStringAsFixed(1)}%, '
+              'net P&L \$${stats.netPnl.toStringAsFixed(2)}, '
+              'profit factor $pfStr, '
+              'expectancy \$${stats.expectancy.toStringAsFixed(2)}. '
+              'Under 100 words, end with one actionable suggestion.',
         ),
       ]);
       setState(() {
@@ -337,59 +212,521 @@ class _ReportsScreenState extends ConsumerState<ReportsScreen> {
     } catch (e) {
       setState(() => _generatingSummary = false);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('AI Error: $e')),
-        );
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('AI Error: $e')));
       }
     }
   }
 }
+
+// ─── Overview Tab ──────────────────────────────────────────────────────────────
+
+class _OverviewTab extends StatelessWidget {
+  const _OverviewTab({
+    required this.trades,
+    required this.stats,
+    required this.aiSummary,
+    required this.generatingSummary,
+    required this.onGenerateSummary,
+    required this.fmt,
+  });
+
+  final List<TradeModel> trades;
+  final TradeStats stats;
+  final String? aiSummary;
+  final bool generatingSummary;
+  final VoidCallback onGenerateSummary;
+  final NumberFormat fmt;
+
+  @override
+  Widget build(BuildContext context) {
+    // Build equity curve spots
+    double running = 0;
+    final equityPoints = <FlSpot>[];
+    for (int i = 0; i < trades.length; i++) {
+      running += trades[i].pnl ?? 0;
+      equityPoints.add(FlSpot(i.toDouble(), running));
+    }
+    double minY = 0, maxY = 0;
+    for (final p in equityPoints) {
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    final yPad = ((maxY - minY) * 0.15).clamp(1.0, double.infinity);
+    final chartMinY = minY - yPad;
+    final chartMaxY = maxY + yPad;
+
+    final best = trades
+        .reduce((a, b) => (a.pnl ?? 0) > (b.pnl ?? 0) ? a : b);
+    final worst = trades
+        .reduce((a, b) => (a.pnl ?? 0) < (b.pnl ?? 0) ? a : b);
+    final pfStr = stats.profitFactor == double.infinity
+        ? '\u221e'
+        : stats.profitFactor.toStringAsFixed(2);
+
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        // Primary stats (Win Rate, Net P&L, Profit Factor, Expectancy)
+        _StatsGrid(children: [
+          _StatCard(
+            label: 'Win Rate',
+            value: '${stats.winRate.toStringAsFixed(1)}%',
+            color: stats.winRate >= 50
+                ? AppTheme.primaryGreen
+                : AppTheme.dangerRed,
+          ),
+          _StatCard(
+            label: 'Net P&L',
+            value:
+                '${stats.netPnl >= 0 ? "+" : ""}\$${fmt.format(stats.netPnl)}',
+            color: stats.netPnl >= 0
+                ? AppTheme.primaryGreen
+                : AppTheme.dangerRed,
+          ),
+          _StatCard(
+            label: 'Profit Factor',
+            value: pfStr,
+            color: stats.profitFactor >= 1.5
+                ? AppTheme.primaryGreen
+                : stats.profitFactor >= 1.0
+                    ? AppTheme.warningYellow
+                    : AppTheme.dangerRed,
+          ),
+          _StatCard(
+            label: 'Expectancy',
+            value:
+                '${stats.expectancy >= 0 ? "+" : ""}\$${fmt.format(stats.expectancy)}',
+            color: stats.expectancy >= 0
+                ? AppTheme.primaryGreen
+                : AppTheme.dangerRed,
+          ),
+        ]),
+        const SizedBox(height: 10),
+
+        // Secondary stats (Avg Win, Avg Loss, Max Drawdown, Avg Hold)
+        _StatsGrid(children: [
+          _StatCard(
+              label: 'Avg Win',
+              value: '+\$${fmt.format(stats.avgWin)}',
+              color: AppTheme.primaryGreen),
+          _StatCard(
+              label: 'Avg Loss',
+              value: '-\$${fmt.format(stats.avgLoss)}',
+              color: AppTheme.dangerRed),
+          _StatCard(
+              label: 'Max Drawdown',
+              value: '\$${fmt.format(stats.maxDrawdown)}',
+              color: AppTheme.warningYellow),
+          _StatCard(
+              label: 'Avg Hold',
+              value: _holdLabel(stats.avgHoldingHours),
+              color: Colors.white),
+        ]),
+        const SizedBox(height: 10),
+
+        // Totals row
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Row(children: [
+              Expanded(
+                  child: _KV('Total Trades', '${stats.total}')),
+              Expanded(
+                  child: _KV(
+                      'W / L', '${stats.wins} / ${stats.losses}')),
+              Expanded(
+                  child:
+                      _KV('Total Pips', fmt.format(stats.totalPips))),
+            ]),
+          ),
+        ),
+        const SizedBox(height: 8),
+
+        // Streaks row
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Row(children: [
+              Expanded(
+                  child: _KV('Win Streak',
+                      '${stats.longestWinStreak}',
+                      color: AppTheme.primaryGreen)),
+              Expanded(
+                  child: _KV('Loss Streak',
+                      '${stats.longestLossStreak}',
+                      color: AppTheme.dangerRed)),
+            ]),
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // Equity curve
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Equity Curve',
+                    style: TextStyle(
+                        color: Colors.grey,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600)),
+                const SizedBox(height: 12),
+                SizedBox(
+                  height: 160,
+                  child: LineChart(
+                    LineChartData(
+                      minY: chartMinY,
+                      maxY: chartMaxY,
+                      gridData: FlGridData(
+                        show: true,
+                        drawVerticalLine: false,
+                        getDrawingHorizontalLine: (_) => FlLine(
+                          color:
+                              Colors.white.withValues(alpha: 0.05),
+                          strokeWidth: 1,
+                        ),
+                      ),
+                      titlesData: FlTitlesData(
+                        leftTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 54,
+                            getTitlesWidget: (v, _) => Text(
+                              '\$${v.toStringAsFixed(0)}',
+                              style: const TextStyle(
+                                  color: Colors.grey, fontSize: 9),
+                            ),
+                          ),
+                        ),
+                        rightTitles: const AxisTitles(
+                            sideTitles:
+                                SideTitles(showTitles: false)),
+                        topTitles: const AxisTitles(
+                            sideTitles:
+                                SideTitles(showTitles: false)),
+                        bottomTitles: const AxisTitles(
+                            sideTitles:
+                                SideTitles(showTitles: false)),
+                      ),
+                      borderData: FlBorderData(show: false),
+                      lineBarsData: [
+                        LineChartBarData(
+                          spots: equityPoints,
+                          isCurved: true,
+                          color: stats.netPnl >= 0
+                              ? AppTheme.primaryGreen
+                              : AppTheme.dangerRed,
+                          barWidth: 2,
+                          dotData: const FlDotData(show: false),
+                          belowBarData: BarAreaData(
+                            show: true,
+                            color: (stats.netPnl >= 0
+                                    ? AppTheme.primaryGreen
+                                    : AppTheme.dangerRed)
+                                .withValues(alpha: 0.1),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // Best / Worst trade
+        Row(children: [
+          Expanded(
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Best Trade',
+                        style: TextStyle(
+                            color: Colors.grey, fontSize: 11)),
+                    Text('+\$${fmt.format(best.pnl ?? 0)}',
+                        style: const TextStyle(
+                            color: AppTheme.primaryGreen,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16)),
+                    Text(
+                        '${best.direction.toUpperCase()} ${best.symbol}',
+                        style: const TextStyle(
+                            color: Colors.grey, fontSize: 10)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Worst Trade',
+                        style: TextStyle(
+                            color: Colors.grey, fontSize: 11)),
+                    Text('\$${fmt.format(worst.pnl ?? 0)}',
+                        style: const TextStyle(
+                            color: AppTheme.dangerRed,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16)),
+                    Text(
+                        '${worst.direction.toUpperCase()} ${worst.symbol}',
+                        style: const TextStyle(
+                            color: Colors.grey, fontSize: 10)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ]),
+        const SizedBox(height: 16),
+
+        // AI Summary card
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text('AI Summary',
+                    style: TextStyle(
+                        color: Colors.grey, fontSize: 12)),
+                const SizedBox(height: 8),
+                if (aiSummary != null)
+                  Text(aiSummary!,
+                      style: const TextStyle(fontSize: 13)),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed:
+                      generatingSummary ? null : onGenerateSummary,
+                  icon: generatingSummary
+                      ? const SizedBox(
+                          height: 14,
+                          width: 14,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2))
+                      : const Icon(Icons.auto_awesome, size: 16),
+                  label: Text(generatingSummary
+                      ? 'Generating\u2026'
+                      : 'Generate AI Summary'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  static String _holdLabel(double hours) {
+    if (hours < 1) return '${(hours * 60).toStringAsFixed(0)}m';
+    if (hours < 24) return '${hours.toStringAsFixed(1)}h';
+    return '${(hours / 24).toStringAsFixed(1)}d';
+  }
+}
+
+// ─── Breakdown Tab ─────────────────────────────────────────────────────────────
+
+class _BreakdownTab extends StatelessWidget {
+  const _BreakdownTab({required this.grouped, this.labelMap});
+
+  final Map<String, TradeStats> grouped;
+  final Map<String, String>? labelMap;
+
+  @override
+  Widget build(BuildContext context) {
+    final fmt = NumberFormat('#,##0.00');
+    final sorted = grouped.entries.toList()
+      ..sort((a, b) => b.value.netPnl.compareTo(a.value.netPnl));
+
+    if (sorted.isEmpty) {
+      return const Center(
+          child:
+              Text('No data', style: TextStyle(color: Colors.grey)));
+    }
+
+    final maxAbsPnl = sorted
+        .map((e) => e.value.netPnl.abs())
+        .fold<double>(0, (a, b) => a > b ? a : b);
+
+    return ListView.separated(
+      padding: const EdgeInsets.all(16),
+      itemCount: sorted.length,
+      separatorBuilder: (_, s) => const SizedBox(height: 8),
+      itemBuilder: (_, i) {
+        final entry = sorted[i];
+        final s = entry.value;
+        final label =
+            labelMap?[entry.key] ?? entry.key.toUpperCase();
+        final isProfit = s.netPnl >= 0;
+        final barFraction =
+            maxAbsPnl > 0 ? (s.netPnl.abs() / maxAbsPnl) : 0.0;
+        final pfStr = s.profitFactor == double.infinity
+            ? '\u221e'
+            : s.profitFactor.toStringAsFixed(2);
+
+        return Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Header row: label + net P&L
+                Row(children: [
+                  Expanded(
+                      child: Text(label,
+                          style: const TextStyle(
+                              fontWeight: FontWeight.w600,
+                              fontSize: 14))),
+                  Text(
+                    '${isProfit ? "+" : ""}\$${fmt.format(s.netPnl)}',
+                    style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                        color: isProfit
+                            ? AppTheme.primaryGreen
+                            : AppTheme.dangerRed),
+                  ),
+                ]),
+                const SizedBox(height: 8),
+
+                // Relative P&L bar
+                LayoutBuilder(builder: (_, c) {
+                  return Container(
+                    height: 4,
+                    width: c.maxWidth * barFraction,
+                    decoration: BoxDecoration(
+                      color: isProfit
+                          ? AppTheme.primaryGreen
+                          : AppTheme.dangerRed,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  );
+                }),
+                const SizedBox(height: 10),
+
+                // Chips: total trades, win rate, W/L, profit factor
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: [
+                    _Chip('${s.total} trades', Colors.grey),
+                    _Chip(
+                        '${s.winRate.toStringAsFixed(0)}% WR',
+                        s.winRate >= 50
+                            ? AppTheme.primaryGreen
+                            : AppTheme.dangerRed),
+                    _Chip('${s.wins}W / ${s.losses}L', Colors.grey),
+                    _Chip('PF: $pfStr', Colors.grey),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ─── Shared helper widgets ─────────────────────────────────────────────────────
 
 class _StatsGrid extends StatelessWidget {
   const _StatsGrid({required this.children});
   final List<Widget> children;
 
   @override
-  Widget build(BuildContext context) {
-    return GridView.count(
-      crossAxisCount: 2,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      crossAxisSpacing: 8,
-      mainAxisSpacing: 8,
-      childAspectRatio: 2.2,
-      children: children,
-    );
-  }
+  Widget build(BuildContext context) => GridView.count(
+        crossAxisCount: 2,
+        shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(),
+        crossAxisSpacing: 8,
+        mainAxisSpacing: 8,
+        childAspectRatio: 2.2,
+        children: children,
+      );
 }
 
 class _StatCard extends StatelessWidget {
   const _StatCard(
-      {required this.label, required this.value, required this.color});
+      {required this.label,
+      required this.value,
+      required this.color});
   final String label;
   final String value;
   final Color color;
 
   @override
-  Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(label,
-                style: const TextStyle(color: Colors.grey, fontSize: 11)),
-            const SizedBox(height: 4),
-            Text(value,
-                style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: color)),
-          ],
+  Widget build(BuildContext context) => Card(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(label,
+                  style: const TextStyle(
+                      color: Colors.grey, fontSize: 11)),
+              const SizedBox(height: 4),
+              Text(value,
+                  style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: color)),
+            ],
+          ),
         ),
-      ),
-    );
-  }
+      );
+}
+
+class _KV extends StatelessWidget {
+  const _KV(this.label, this.value, {this.color});
+  final String label;
+  final String value;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) => Column(
+        children: [
+          Text(label,
+              style: const TextStyle(
+                  color: Colors.grey, fontSize: 11)),
+          const SizedBox(height: 4),
+          Text(value,
+              style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 14,
+                  color: color ?? Colors.white)),
+        ],
+      );
+}
+
+class _Chip extends StatelessWidget {
+  const _Chip(this.label, this.color);
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding:
+            const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          border: Border.all(color: color.withValues(alpha: 0.4)),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Text(label,
+            style: TextStyle(color: color, fontSize: 11)),
+      );
 }

@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import '../../core/constants/trading_constants.dart';
 import '../../core/models/trade_model.dart';
 import '../../core/providers/app_providers.dart';
+import '../../core/services/nim_service.dart';
 import '../../core/theme/app_theme.dart';
 
 class TradeDetailScreen extends ConsumerWidget {
@@ -244,14 +245,17 @@ class _DetailBody extends StatelessWidget {
           ]),
 
         // ── AI Review ────────────────────────────────────────────────────
-        if (trade.aiReview != null && trade.aiReview!.isNotEmpty)
-          _card('AI Review', [
-            Text(
-              trade.aiReview!['text']?.toString() ??
-                  trade.aiReview!.toString(),
-              style: const TextStyle(fontSize: 13, height: 1.5),
-            ),
-          ]),
+        if (isClosed) ...[if (trade.aiReview != null && trade.aiReview!.isNotEmpty)
+            _card('AI Review', [
+              Text(
+                trade.aiReview!['text']?.toString() ??
+                    trade.aiReview!.toString(),
+                style: const TextStyle(fontSize: 13, height: 1.5),
+              ),
+            ])
+          else
+            _AiReviewButton(trade: trade),
+        ],
 
         // ── Note ─────────────────────────────────────────────────────────
         if (trade.note != null && trade.note!.isNotEmpty)
@@ -301,4 +305,119 @@ class _DetailBody extends StatelessWidget {
 
   String _capitalize(String s) =>
       s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
+}
+
+// ── AI Review Button ──────────────────────────────────────────────────────────
+
+class _AiReviewButton extends ConsumerStatefulWidget {
+  const _AiReviewButton({required this.trade});
+  final TradeModel trade;
+
+  @override
+  ConsumerState<_AiReviewButton> createState() => _AiReviewButtonState();
+}
+
+class _AiReviewButtonState extends ConsumerState<_AiReviewButton> {
+  bool _loading = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: OutlinedButton.icon(
+        onPressed: _loading ? null : _requestReview,
+        style: OutlinedButton.styleFrom(
+          minimumSize: const Size.fromHeight(48),
+          side: const BorderSide(color: AppTheme.primaryGreen),
+        ),
+        icon: _loading
+            ? const SizedBox(
+                height: 14,
+                width: 14,
+                child: CircularProgressIndicator(strokeWidth: 2))
+            : const Icon(Icons.auto_awesome,
+                color: AppTheme.primaryGreen, size: 16),
+        label: Text(
+          _loading ? 'Analysing trade\u2026' : 'Get AI Trade Review',
+          style: const TextStyle(color: AppTheme.primaryGreen),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _requestReview() async {
+    final nim = ref.read(nimServiceProvider);
+    if (nim == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Configure NIM API key in Settings first.')),
+        );
+      }
+      return;
+    }
+    setState(() => _loading = true);
+    try {
+      final settings = ref.read(settingsProvider).valueOrNull;
+      final balance =
+          ref.read(confirmedBalanceProvider).valueOrNull ?? 0.0;
+      final t = widget.trade;
+
+      final parts = <String>[
+        'Review this closed trade and give concise coaching feedback.',
+        '${t.direction.toUpperCase()} ${t.symbol} (${t.market})',
+        'Lots: ${t.lots}  |  Entry: ${t.entryPrice}'
+            '${t.exitPrice != null ? '  |  Exit: ${t.exitPrice}' : ''}',
+        if (t.pnl != null)
+          'Result: ${t.pnl! >= 0 ? '+' : ''}\$${t.pnl!.toStringAsFixed(2)}'
+              '${t.pips != null ? '  (${t.pips!.toStringAsFixed(1)} pips)' : ''}',
+        if (t.session != 'none') 'Session: ${t.session}',
+        if (t.setup != 'none') 'Setup used: ${t.setup}',
+        if (t.emotionConfidence != null || t.emotionFear != null)
+          'Pre-trade emotions — confidence: ${t.emotionConfidence ?? '?'}/5, '
+              'fear: ${t.emotionFear ?? '?'}/5'
+              '${t.emotionState != null ? ', state: ${t.emotionState}' : ''}',
+        if (t.mistakeTags.isNotEmpty)
+          'Mistakes tagged: ${t.mistakeTags.join(', ')}',
+        if (t.satisfactionScore != null)
+          'Self-satisfaction: ${t.satisfactionScore}/5',
+        if (t.lessonsLearned != null && t.lessonsLearned!.isNotEmpty)
+          'Lessons noted: ${t.lessonsLearned}',
+        '',
+        'Structure your response as:\n'
+            '**Strengths:** (what went well)\n'
+            '**Weaknesses:** (what to improve)\n'
+            '**Suggestion:** (one concrete action)\n'
+            '**Score:** X/10\n'
+            'Max 200 words total.',
+      ];
+
+      final systemMsg = NimService.buildSystemPrompt(
+        accountType: settings?.accountType ?? 'usd',
+        balance: balance,
+        openTradesJson: 'Reviewing a closed trade',
+        marginLevelPct: double.infinity,
+        language: settings?.aiLanguage ?? 'en',
+      );
+
+      final result = await nim.complete([
+        systemMsg,
+        NimMessage(role: 'user', content: parts.join('\n')),
+      ]);
+
+      final uid = ref.read(currentUserProvider)?.uid;
+      if (uid != null) {
+        await ref
+            .read(tradesRepositoryProvider)
+            .updateTrade(uid, t.copyWith(aiReview: {'text': result}));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('AI Error: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
 }

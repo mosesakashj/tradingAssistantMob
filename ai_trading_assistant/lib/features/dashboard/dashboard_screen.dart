@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
+import 'package:go_router/go_router.dart';
+
 import '../../core/providers/app_providers.dart';
 import '../../core/services/stopout_calculator.dart';
 import '../../core/theme/app_theme.dart';
@@ -13,6 +15,7 @@ class DashboardScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final tradesAsync = ref.watch(openTradesProvider);
+    final closedAsync = ref.watch(closedTradesProvider);
     final balanceAsync = ref.watch(confirmedBalanceProvider);
     final settingsAsync = ref.watch(settingsProvider);
     final calculator = ref.watch(stopoutCalculatorProvider);
@@ -21,6 +24,18 @@ class DashboardScreen extends ConsumerWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Dashboard'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.calculate_outlined),
+            tooltip: 'Risk Calculator',
+            onPressed: () => context.push('/calculator'),
+          ),
+          IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: 'Settings',
+            onPressed: () => context.push('/settings'),
+          ),
+        ],
       ),
       body: tradesAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
@@ -45,26 +60,24 @@ class DashboardScreen extends ConsumerWidget {
               ) ??
               double.infinity;
 
-          final xauStopout = calculator?.stopoutPriceForPair(
-                pair: 'XAUUSD',
-                equity: balance,
-                openTrades: summaries,
-              ) ??
-              0.0;
-          final xagStopout = calculator?.stopoutPriceForPair(
-                pair: 'XAGUSD',
-                equity: balance,
-                openTrades: summaries,
-              ) ??
-              0.0;
+          // Dynamic per-symbol data
+          final symbols =
+              trades.map((t) => t.symbol).toSet().toList()..sort();
 
-          // Aggregate lots and floating P&L across open trades
-          final xauTrades = trades.where((t) => t.symbol == 'XAUUSD');
-          final xagTrades = trades.where((t) => t.symbol == 'XAGUSD');
-          final xauLots =
-              xauTrades.fold<double>(0, (s, t) => s + t.lots);
-          final xagLots =
-              xagTrades.fold<double>(0, (s, t) => s + t.lots);
+          // Recent performance (last 30 days)
+          final recentClosed = (closedAsync.valueOrNull ?? [])
+              .where((t) =>
+                  t.closedAt != null &&
+                  t.closedAt!.isAfter(
+                      DateTime.now().subtract(const Duration(days: 30))))
+              .toList();
+          final wins =
+              recentClosed.where((t) => (t.pnl ?? 0) > 0).length;
+          final recentPnl = recentClosed.fold<double>(
+              0, (s, t) => s + (t.pnl ?? 0));
+          final winRate = recentClosed.isEmpty
+              ? 0.0
+              : wins / recentClosed.length * 100;
 
           return RefreshIndicator(
             onRefresh: () async {},
@@ -115,31 +128,78 @@ class DashboardScreen extends ConsumerWidget {
                   ),
                   const SizedBox(height: 16),
 
-                  // Stopout levels side by side
-                  _InfoRow(
-                    children: [
-                      _InfoCard(
-                        label: 'XAUUSD Stopout',
-                        value: xauTrades.isEmpty
-                            ? '—'
-                            : '\$${fmt.format(xauStopout)}',
-                        sublabel: xauLots > 0
-                            ? '${xauLots.toStringAsFixed(2)} lots'
-                            : null,
-                        color: AppTheme.dangerRed,
+                  // Dynamic per-symbol stopout cards
+                  if (symbols.isNotEmpty)
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: symbols.map((sym) {
+                        final symLots = trades
+                            .where((t) => t.symbol == sym)
+                            .fold<double>(0, (s, t) => s + t.lots);
+                        final stopPrice =
+                            calculator?.stopoutPriceForPair(
+                                  pair: sym,
+                                  equity: balance,
+                                  openTrades: summaries,
+                                ) ??
+                                0.0;
+                        return SizedBox(
+                          width:
+                              (MediaQuery.of(context).size.width - 48) /
+                              2,
+                          child: _InfoCard(
+                            label: '$sym Stopout',
+                            value: '\$${fmt.format(stopPrice)}',
+                            sublabel:
+                                '${symLots.toStringAsFixed(2)} lots',
+                            color: AppTheme.dangerRed,
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  const SizedBox(height: 16),
+
+                  // Recent performance card
+                  if (recentClosed.isNotEmpty)
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('Last 30 Days',
+                                style: TextStyle(
+                                    color: Colors.grey,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600)),
+                            const SizedBox(height: 12),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: _StatCell(
+                                      'Trades',
+                                      recentClosed.length.toString()),
+                                ),
+                                Expanded(
+                                  child: _StatCell('Win Rate',
+                                      '${winRate.toStringAsFixed(1)}%'),
+                                ),
+                                Expanded(
+                                  child: _StatCell(
+                                    '30d P&L',
+                                    '${recentPnl >= 0 ? '+' : ''}\$${fmt.format(recentPnl)}',
+                                    valueColor: recentPnl >= 0
+                                        ? AppTheme.primaryGreen
+                                        : AppTheme.dangerRed,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
                       ),
-                      _InfoCard(
-                        label: 'XAGUSD Stopout',
-                        value: xagTrades.isEmpty
-                            ? '—'
-                            : '\$${fmt.format(xagStopout)}',
-                        sublabel: xagLots > 0
-                            ? '${xagLots.toStringAsFixed(2)} lots'
-                            : null,
-                        color: AppTheme.dangerRed,
-                      ),
-                    ],
-                  ),
+                    ),
                   const SizedBox(height: 16),
 
                   // Margin call warning banner
@@ -246,6 +306,32 @@ class _InfoCard extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _StatCell extends StatelessWidget {
+  const _StatCell(this.label, this.value, {this.valueColor});
+  final String label;
+  final String value;
+  final Color? valueColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Text(label,
+            style: const TextStyle(color: Colors.grey, fontSize: 11)),
+        const SizedBox(height: 4),
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.bold,
+            color: valueColor ?? Colors.white,
+          ),
+        ),
+      ],
     );
   }
 }

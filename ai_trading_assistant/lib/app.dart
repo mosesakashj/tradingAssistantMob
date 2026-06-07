@@ -13,6 +13,8 @@ import 'features/history/history_screen.dart';
 import 'features/history/trade_detail_screen.dart';
 import 'features/ai_chat/ai_chat_screen.dart';
 import 'features/settings/settings_screen.dart';
+import 'features/calculator/calculator_screen.dart';
+import 'features/reports/reports_screen.dart';
 import 'features/trade_entry/trade_entry_screen.dart';
 
 // ── Auth-aware router notifier ────────────────────────────────────────────────
@@ -82,6 +84,10 @@ final routerProvider = Provider<GoRouter>((ref) {
             path: '/ai',
             builder: (ctx, st) => const AiChatScreen(),
           ),
+          GoRoute(
+            path: '/reports',
+            builder: (ctx, st) => const ReportsScreen(),
+          ),
         ],
       ),
       // Full-screen routes (no bottom nav)
@@ -97,6 +103,10 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/history/:id',
         builder: (ctx, st) =>
             TradeDetailScreen(tradeId: st.pathParameters['id']!),
+      ),
+      GoRoute(
+        path: '/calculator',
+        builder: (ctx, st) => const CalculatorScreen(),
       ),
     ],
   );
@@ -119,6 +129,7 @@ class _AppShell extends StatelessWidget {
     ),
     (path: '/history', icon: Icons.history, label: 'History'),
     (path: '/ai', icon: Icons.auto_awesome_outlined, label: 'AI'),
+    (path: '/reports', icon: Icons.bar_chart_outlined, label: 'Analytics'),
   ];
 
   int _currentIndex(BuildContext context) {
